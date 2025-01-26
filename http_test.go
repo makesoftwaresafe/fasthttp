@@ -3,7 +3,6 @@ package fasthttp
 import (
 	"bufio"
 	"bytes"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -22,22 +21,14 @@ import (
 func TestInvalidTrailers(t *testing.T) {
 	t.Parallel()
 
-	if err := (&Response{}).Read(bufio.NewReader(bytes.NewReader([]byte{0x20, 0x30, 0x0a, 0x54, 0x72, 0x61, 0x6e, 0x73, 0x66, 0x65, 0x72, 0x2d, 0x45, 0x6e, 0x63, 0x6f, 0x64, 0x69, 0x6e, 0x67, 0x3a, 0xff, 0x0a, 0x0a, 0x30, 0x0d, 0x0a, 0x30}))); !errors.Is(err, io.EOF) {
+	if err := (&Response{}).Read(bufio.NewReader(strings.NewReader(" 0\nTransfer-Encoding:\xff\n\n0\r\n0"))); !errors.Is(err, io.EOF) {
 		t.Fatalf("%#v", err)
 	}
-	if err := (&Response{}).Read(bufio.NewReader(bytes.NewReader([]byte{0xff, 0x20, 0x0a, 0x54, 0x52, 0x61, 0x49, 0x4c, 0x65, 0x52, 0x3a, 0x2c, 0x0a, 0x0a}))); !errors.Is(err, errEmptyInt) {
+	if err := (&Response{}).Read(bufio.NewReader(strings.NewReader("\xff \nTRaILeR:,\n\n"))); !errors.Is(err, errEmptyInt) {
 		t.Fatal(err)
 	}
-	if err := (&Response{}).Read(bufio.NewReader(bytes.NewReader([]byte{0x54, 0x52, 0x61, 0x49, 0x4c, 0x65, 0x52, 0x3a, 0x2c, 0x0a, 0x0a}))); !strings.Contains(err.Error(), "cannot find whitespace in the first line of response") {
+	if err := (&Response{}).Read(bufio.NewReader(strings.NewReader("TRaILeR:,\n\n"))); !strings.Contains(err.Error(), "cannot find whitespace in the first line of response") {
 		t.Fatal(err)
-	}
-	if err := (&Request{}).Read(bufio.NewReader(bytes.NewReader([]byte{0xff, 0x20, 0x0a, 0x54, 0x52, 0x61, 0x49, 0x4c, 0x65, 0x52, 0x3a, 0x2c, 0x0a, 0x0a}))); !strings.Contains(err.Error(), "contain forbidden trailer") {
-		t.Fatal(err)
-	}
-
-	b, _ := base64.StdEncoding.DecodeString("tCAKIDoKCToKICAKCToKICAKCToKIAogOgoJOgogIAoJOgovIC8vOi4KOh0KVFJhSUxlUjo9HT09HQpUUmFJTGVSOicQAApUUmFJTGVSOj0gHSAKCT09HQoKOgoKCgo=")
-	if err := (&Request{}).Read(bufio.NewReader(bytes.NewReader(b))); !strings.Contains(err.Error(), "error when reading request headers: invalid header key") {
-		t.Fatalf("%#v", err)
 	}
 }
 
@@ -164,8 +155,8 @@ func testRequestCopyTo(t *testing.T, src *Request) {
 	var dst Request
 	src.CopyTo(&dst)
 
-	if !reflect.DeepEqual(*src, dst) { //nolint:govet
-		t.Fatalf("RequestCopyTo fail, src: \n%+v\ndst: \n%+v\n", *src, dst) //nolint:govet
+	if !reflect.DeepEqual(src, &dst) {
+		t.Fatalf("RequestCopyTo fail, src: \n%+v\ndst: \n%+v\n", src, &dst)
 	}
 }
 
@@ -173,8 +164,8 @@ func testResponseCopyTo(t *testing.T, src *Response) {
 	var dst Response
 	src.CopyTo(&dst)
 
-	if !reflect.DeepEqual(*src, dst) { //nolint:govet
-		t.Fatalf("ResponseCopyTo fail, src: \n%+v\ndst: \n%+v\n", *src, dst) //nolint:govet
+	if !reflect.DeepEqual(src, &dst) {
+		t.Fatalf("ResponseCopyTo fail, src: \n%+v\ndst: \n%+v\n", src, &dst)
 	}
 }
 
@@ -1219,7 +1210,7 @@ func TestRequestReadGzippedBody(t *testing.T) {
 	if r.Header.ContentLength() != len(body) {
 		t.Fatalf("unexpected content-length: %d. Expecting %d", r.Header.ContentLength(), len(body))
 	}
-	if string(r.Body()) != string(body) {
+	if !bytes.Equal(r.Body(), body) {
 		t.Fatalf("unexpected body: %q. Expecting %q", r.Body(), body)
 	}
 
@@ -1332,7 +1323,7 @@ func TestRequestContinueReadBodyDisablePrereadMultipartForm(t *testing.T) {
 		t.Fatalf("The multipartForm of the Request must be nil")
 	}
 
-	if string(formData) != string(r.Body()) {
+	if !bytes.Equal(formData, r.Body()) {
 		t.Fatalf("The body given must equal the body in the Request")
 	}
 }
@@ -1700,32 +1691,6 @@ func testRequestReadLimitBodySuccess(t *testing.T, s string, maxBodySize int) {
 	}
 }
 
-func FuzzResponseReadLimitBody(f *testing.F) {
-	res := AcquireResponse()
-	defer ReleaseResponse(res)
-
-	f.Add([]byte("HTTP/1.1 200 OK\r\nContent-Type: aa\r\nContent-Length: 10\r\n\r\n9876543210"), 1024*1024)
-
-	f.Fuzz(func(t *testing.T, body []byte, max int) {
-		_ = res.ReadLimitBody(bufio.NewReader(bytes.NewReader(body)), max)
-		w := bytes.Buffer{}
-		_, _ = res.WriteTo(&w)
-	})
-}
-
-func FuzzRequestReadLimitBody(f *testing.F) {
-	req := AcquireRequest()
-	defer ReleaseRequest(req)
-
-	f.Add([]byte("POST /a HTTP/1.1\r\nHost: a.com\r\nTransfer-Encoding: chunked\r\nContent-Type: aa\r\n\r\n6\r\nfoobar\r\n3\r\nbaz\r\n0\r\nfoobar\r\n\r\n"), 1024*1024)
-
-	f.Fuzz(func(t *testing.T, body []byte, max int) {
-		_ = req.ReadLimitBody(bufio.NewReader(bytes.NewReader(body)), max)
-		w := bytes.Buffer{}
-		_, _ = req.WriteTo(&w)
-	})
-}
-
 func TestRequestString(t *testing.T) {
 	t.Parallel()
 
@@ -2056,25 +2021,27 @@ func TestResponseReadWithoutBody(t *testing.T) {
 	var resp Response
 
 	testResponseReadWithoutBody(t, &resp, "HTTP/1.1 304 Not Modified\r\nContent-Type: aa\r\nContent-Length: 1235\r\n\r\n", false,
-		304, 1235, "aa", nil)
+		304, 1235, "aa")
 
-	testResponseReadWithoutBody(t, &resp, "HTTP/1.1 204 Foo Bar\r\nContent-Type: aab\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nFoo: bar\r\n\r\n", false,
-		204, -1, "aab", map[string]string{"Foo": "bar"})
+	testResponseReadWithoutBody(t, &resp, "HTTP/1.1 204 Foo Bar\r\nContent-Type: aab\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n", false,
+		204, -1, "aab")
 
 	testResponseReadWithoutBody(t, &resp, "HTTP/1.1 123 AAA\r\nContent-Type: xxx\r\nContent-Length: 3434\r\n\r\n", false,
-		123, 3434, "xxx", nil)
+		123, 3434, "xxx")
 
 	testResponseReadWithoutBody(t, &resp, "HTTP 200 OK\r\nContent-Type: text/xml\r\nContent-Length: 123\r\n\r\nfoobar\r\n", true,
-		200, 123, "text/xml", nil)
+		200, 123, "text/xml")
 
 	// '100 Continue' must be skipped.
 	testResponseReadWithoutBody(t, &resp, "HTTP/1.1 100 Continue\r\nFoo-bar: baz\r\n\r\nHTTP/1.1 329 aaa\r\nContent-Type: qwe\r\nContent-Length: 894\r\n\r\n", true,
-		329, 894, "qwe", nil)
+		329, 894, "qwe")
 }
 
 func testResponseReadWithoutBody(t *testing.T, resp *Response, s string, skipBody bool,
-	expectedStatusCode, expectedContentLength int, expectedContentType string, expectedTrailer map[string]string,
+	expectedStatusCode, expectedContentLength int, expectedContentType string,
 ) {
+	t.Helper()
+
 	r := bytes.NewBufferString(s)
 	rb := bufio.NewReader(r)
 	resp.SkipBody = skipBody
@@ -2086,7 +2053,6 @@ func testResponseReadWithoutBody(t *testing.T, resp *Response, s string, skipBod
 		t.Fatalf("Unexpected response body %q. Expected %q. response=%q", resp.Body(), "", s)
 	}
 	verifyResponseHeader(t, &resp.Header, expectedStatusCode, expectedContentLength, expectedContentType, "")
-	verifyResponseTrailer(t, &resp.Header, expectedTrailer)
 
 	// verify that ordinal response is read after null-body response
 	resp.SkipBody = false
@@ -2693,8 +2659,8 @@ func TestRequestRawBodyCopyTo(t *testing.T) {
 }
 
 type testReader struct {
-	read    chan (int)
-	cb      chan (struct{})
+	read    chan int
+	cb      chan struct{}
 	onClose func() error
 }
 
@@ -2978,7 +2944,7 @@ func TestResponseBodyStream(t *testing.T) {
 			t.Fatalf("parse response find err: %v", err)
 		}
 		defer func() {
-			if err := response.closeBodyStream(); err != nil {
+			if err := response.closeBodyStream(nil); err != nil {
 				t.Fatalf("close body stream err: %v", err)
 			}
 		}()
@@ -3206,5 +3172,28 @@ func TestRespCopeToRace(t *testing.T) {
 		if strconv.Itoa(i) != string(resps[i].Body()) {
 			t.Fatalf("Unexpected resp body %s. Expected %s", string(resps[i].Body()), strconv.Itoa(i))
 		}
+	}
+}
+
+func TestRequestGetTimeOut(t *testing.T) {
+	tests := []struct {
+		name     string
+		timeout  time.Duration
+		expected time.Duration
+	}{
+		{"Timeout set to 0", 0, 0},
+		{"Timeout set to 5s", 5 * time.Second, 5 * time.Second},
+		{"Timeout set to 1m", 1 * time.Minute, 1 * time.Minute},
+		{"Timeout set to 500ms", 500 * time.Millisecond, 500 * time.Millisecond},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			req := &Request{timeout: test.timeout}
+
+			if got := req.GetTimeOut(); got != test.expected {
+				t.Errorf("GetTimeOut() = %v, want %v", got, test.expected)
+			}
+		})
 	}
 }

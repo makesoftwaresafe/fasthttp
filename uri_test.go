@@ -9,25 +9,6 @@ import (
 	"time"
 )
 
-func FuzzURIUpdateBytes(f *testing.F) {
-	u := AcquireURI()
-	defer ReleaseURI(u)
-
-	f.Add([]byte(`http://foobar.com/aaa/bb?cc`))
-	f.Add([]byte(`//foobar.com/aaa/bb?cc`))
-	f.Add([]byte(`/aaa/bb?cc`))
-	f.Add([]byte(`xx?yy=abc`))
-
-	f.Fuzz(func(t *testing.T, uri []byte) {
-		u.UpdateBytes(uri)
-
-		w := bytes.Buffer{}
-		if _, err := u.WriteTo(&w); err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-	})
-}
-
 func TestURICopyToQueryArgs(t *testing.T) {
 	t.Parallel()
 
@@ -249,14 +230,14 @@ func TestURICopyTo(t *testing.T) {
 	var u URI
 	var copyU URI
 	u.CopyTo(&copyU)
-	if !reflect.DeepEqual(u, copyU) { //nolint:govet
-		t.Fatalf("URICopyTo fail, u: \n%+v\ncopyu: \n%+v\n", u, copyU) //nolint:govet
+	if !reflect.DeepEqual(&u, &copyU) {
+		t.Fatalf("URICopyTo fail, u: \n%+v\ncopyu: \n%+v\n", &u, &copyU)
 	}
 
 	u.UpdateBytes([]byte("https://example.com/foo?bar=baz&baraz#qqqq"))
 	u.CopyTo(&copyU)
-	if !reflect.DeepEqual(u, copyU) { //nolint:govet
-		t.Fatalf("URICopyTo fail, u: \n%+v\ncopyu: \n%+v\n", u, copyU) //nolint:govet
+	if !reflect.DeepEqual(&u, &copyU) {
+		t.Fatalf("URICopyTo fail, u: \n%+v\ncopyu: \n%+v\n", &u, &copyU)
 	}
 }
 
@@ -501,5 +482,19 @@ func TestNoOverwriteInput(t *testing.T) {
 
 	if u.String() != "http://\xaa/" {
 		t.Errorf("%q", u.String())
+	}
+}
+
+func TestFragmentInHost(t *testing.T) {
+	url := "http://google.com#@github.com"
+	u := AcquireURI()
+	defer ReleaseURI(u)
+
+	if err := u.Parse(nil, []byte(url)); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := string(u.Host()); got != "google.com" {
+		t.Fatalf("Unexpected host %q. Expected %q", got, "google.com")
 	}
 }

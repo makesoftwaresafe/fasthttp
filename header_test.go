@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -112,6 +113,53 @@ func TestResponseHeaderMultiLineValue(t *testing.T) {
 	}
 }
 
+func TestIssue1808(t *testing.T) {
+	t.Parallel()
+
+	s := "HTTP/1.1 200\r\n" +
+		"WithTabs: \t v1 \t\r\n" + // "v1"
+		"WithTabs-Start: \t \t v1 \r\n" + // "v1"
+		"WithTabs-End: v1 \t \t\t\t\r\n" + // "v1"
+		"WithTabs-Multi-Line: \t v1 \t;\r\n \t v2 \t;\r\n\t v3\r\n" + // "v1 \t; v2 \t; v3"
+		"\r\n"
+
+	resHeader := new(ResponseHeader)
+	if _, err := resHeader.parse([]byte(s)); err != nil {
+		t.Fatalf("parse headers with tabs values failed, %v", err)
+	}
+
+	groundTruth := map[string]string{
+		"WithTabs":            "v1",
+		"WithTabs-Start":      "v1",
+		"WithTabs-End":        "v1",
+		"WithTabs-Multi-Line": "v1 \t; v2 \t; v3",
+	}
+
+	for name, want := range groundTruth {
+		if got := b2s(resHeader.Peek(name)); got != want {
+			t.Errorf("ResponseHeader.parser() unexpected %q got: %q want: %q", name, got, want)
+		}
+	}
+
+	s = "GET / HTTP/1.1\r\n" +
+		"WithTabs: \t v1 \t\r\n" + // "v1"
+		"WithTabs-Start: \t \t v1 \r\n" + // "v1"
+		"WithTabs-End: v1 \t \t\t\t\r\n" + // "v1"
+		"WithTabs-Multi-Line: \t v1 \t;\r\n \t v2 \t;\r\n\t v3\r\n" + // "v1 \t; v2 \t; v3"
+		"\r\n"
+
+	reqHeader := new(RequestHeader)
+	if _, err := reqHeader.parse([]byte(s)); err != nil {
+		t.Fatalf("parse headers with tabs values failed, %v", err)
+	}
+
+	for name, want := range groundTruth {
+		if got := b2s(reqHeader.Peek(name)); got != want {
+			t.Errorf("RequestHeader.parser() unexpected %q got: %q want: %q", name, got, want)
+		}
+	}
+}
+
 func TestResponseHeaderMultiLineName(t *testing.T) {
 	t.Parallel()
 
@@ -153,6 +201,19 @@ func TestResponseHeaderMultiLinePanicked(t *testing.T) {
 	}
 }
 
+func TestRequestHeaderLooseBackslashR(t *testing.T) {
+	t.Parallel()
+
+	s := "GET / HTTP/1.1\r\n" +
+		"Host: go.dev\r\n" +
+		"\rFoo: bar\r\n" +
+		"\r\n"
+	header := new(RequestHeader)
+	if _, err := header.parse([]byte(s)); err == nil {
+		t.Fatal("expected error, got <nil>")
+	}
+}
+
 func TestResponseHeaderEmptyValueFromHeader(t *testing.T) {
 	t.Parallel()
 
@@ -167,7 +228,7 @@ func TestResponseHeaderEmptyValueFromHeader(t *testing.T) {
 	if err := h.Read(br); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if string(h.ContentType()) != string(h1.ContentType()) {
+	if !bytes.Equal(h.ContentType(), h1.ContentType()) {
 		t.Fatalf("unexpected content-type: %q. Expecting %q", h.ContentType(), h1.ContentType())
 	}
 	v1 := h.Peek("EmptyValue1")
@@ -222,7 +283,7 @@ func TestRequestHeaderEmptyValueFromHeader(t *testing.T) {
 	if err := h.Read(br); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if string(h.Host()) != string(h1.Host()) {
+	if !bytes.Equal(h.Host(), h1.Host()) {
 		t.Fatalf("unexpected host: %q. Expecting %q", h.Host(), h1.Host())
 	}
 	v1 := h.Peek("EmptyValue1")
@@ -341,7 +402,7 @@ func TestRequestRawHeaders(t *testing.T) {
 		if err := h.Read(br); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if string(h.Host()) != "" {
+		if len(h.Host()) != 0 {
 			t.Fatalf("unexpected host: %q. Expecting %q", h.Host(), "")
 		}
 		v1 := h.Peek("NoKey")
@@ -454,7 +515,7 @@ func TestResponseHeaderAdd(t *testing.T) {
 	m["bbb"] = struct{}{}
 	m["xxx"] = struct{}{}
 	for i := 0; i < 10; i++ {
-		v := fmt.Sprintf("%d", i)
+		v := strconv.Itoa(i)
 		h.Add("Foo-Bar", v)
 		m[v] = struct{}{}
 	}
@@ -507,7 +568,7 @@ func TestRequestHeaderAdd(t *testing.T) {
 	m["bbb"] = struct{}{}
 	m["xxx"] = struct{}{}
 	for i := 0; i < 10; i++ {
-		v := fmt.Sprintf("%d", i)
+		v := strconv.Itoa(i)
 		h.Add("Foo-Bar", v)
 		m[v] = struct{}{}
 	}
@@ -687,11 +748,11 @@ func TestResponseHeaderDel(t *testing.T) {
 		t.Fatalf("non-zero value: %q", hv)
 	}
 	hv = h.Peek(HeaderContentType)
-	if string(hv) != string(defaultContentType) {
+	if !bytes.Equal(hv, defaultContentType) {
 		t.Fatalf("unexpected content-type: %q. Expecting %q", hv, defaultContentType)
 	}
 	hv = h.Peek(HeaderContentEncoding)
-	if string(hv) != ("gzip") {
+	if string(hv) != "gzip" {
 		t.Fatalf("unexpected content-encoding: %q. Expecting %q", hv, "gzip")
 	}
 	hv = h.Peek(HeaderServer)
@@ -1110,26 +1171,6 @@ func testVisitHeaderParams(t *testing.T, header string, expectedParams [][2]stri
 	}
 }
 
-func FuzzVisitHeaderParams(f *testing.F) {
-	inputs := []string{
-		`application/json; v=1; foo=bar; q=0.938; param=param; param="big fox"; q=0.43`,
-		`*/*`,
-		`\\`,
-		`text/plain; foo="\\\"\'\\''\'"`,
-	}
-	for _, input := range inputs {
-		f.Add([]byte(input))
-	}
-	f.Fuzz(func(t *testing.T, header []byte) {
-		VisitHeaderParams(header, func(key, value []byte) bool {
-			if len(key) == 0 {
-				t.Errorf("Unexpected length zero parameter, failed input was: %s", header)
-			}
-			return true
-		})
-	})
-}
-
 func TestRequestMultipartFormBoundary(t *testing.T) {
 	t.Parallel()
 
@@ -1314,7 +1355,7 @@ func TestResponseHeaderFirstByteReadEOF(t *testing.T) {
 
 	var h ResponseHeader
 
-	r := &errorReader{fmt.Errorf("non-eof error")}
+	r := &errorReader{err: errors.New("non-eof error")}
 	br := bufio.NewReader(r)
 	err := h.Read(br)
 	if err == nil {
@@ -1361,11 +1402,6 @@ func TestRequestHeaderHTTPVer(t *testing.T) {
 	// non-http/1.1
 	testRequestHeaderHTTPVer(t, "GET / HTTP/1.0\r\nHost: aa.com\r\n\r\n", true)
 	testRequestHeaderHTTPVer(t, "GET / HTTP/0.9\r\nHost: aa.com\r\n\r\n", true)
-	testRequestHeaderHTTPVer(t, "GET / foobar\r\nHost: aa.com\r\n\r\n", true)
-
-	// empty http version
-	testRequestHeaderHTTPVer(t, "GET /\r\nHost: aaa.com\r\n\r\n", true)
-	testRequestHeaderHTTPVer(t, "GET / \r\nHost: aaa.com\r\n\r\n", true)
 
 	// http/1.1
 	testRequestHeaderHTTPVer(t, "GET / HTTP/1.1\r\nHost: a.com\r\n\r\n", false)
@@ -1385,6 +1421,8 @@ func testResponseHeaderHTTPVer(t *testing.T, s string, connectionClose bool) {
 }
 
 func testRequestHeaderHTTPVer(t *testing.T, s string, connectionClose bool) {
+	t.Helper()
+
 	var h RequestHeader
 
 	r := bytes.NewBufferString(s)
@@ -1427,11 +1465,13 @@ func TestResponseHeaderCopyTo(t *testing.T) {
 	}
 
 	// flush buf
-	h.bufKV = argsKV{}
-	h1.bufKV = argsKV{}
+	h.bufK = []byte{}
+	h.bufV = []byte{}
+	h1.bufK = []byte{}
+	h1.bufV = []byte{}
 
-	if !reflect.DeepEqual(h, h1) { //nolint:govet
-		t.Fatalf("ResponseHeaderCopyTo fail, src: \n%+v\ndst: \n%+v\n", h, h1) //nolint:govet
+	if !reflect.DeepEqual(&h, &h1) {
+		t.Fatalf("ResponseHeaderCopyTo fail, src: \n%+v\ndst: \n%+v\n", &h, &h1)
 	}
 }
 
@@ -1470,11 +1510,13 @@ func TestRequestHeaderCopyTo(t *testing.T) {
 	}
 
 	// flush buf
-	h.bufKV = argsKV{}
-	h1.bufKV = argsKV{}
+	h.bufK = []byte{}
+	h.bufV = []byte{}
+	h1.bufK = []byte{}
+	h1.bufV = []byte{}
 
-	if !reflect.DeepEqual(h, h1) { //nolint:govet
-		t.Fatalf("RequestHeaderCopyTo fail, src: \n%+v\ndst: \n%+v\n", h, h1) //nolint:govet
+	if !reflect.DeepEqual(&h, &h1) {
+		t.Fatalf("RequestHeaderCopyTo fail, src: \n%+v\ndst: \n%+v\n", &h, &h1)
 	}
 }
 
@@ -1489,7 +1531,7 @@ func TestResponseContentTypeNoDefaultNotEmpty(t *testing.T) {
 	headers := h.String()
 
 	if strings.Contains(headers, "Content-Type: \r\n") {
-		t.Fatalf("ResponseContentTypeNoDefaultNotEmpty fail, response: \n%+v\noutcome: \n%q\n", h, headers) //nolint:govet
+		t.Fatalf("ResponseContentTypeNoDefaultNotEmpty fail, response: \n%+v\noutcome: \n%q\n", &h, headers)
 	}
 }
 
@@ -1542,7 +1584,7 @@ func TestRequestContentTypeNoDefault(t *testing.T) {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 
-	if string(h1.contentType) != "" {
+	if len(h1.contentType) != 0 {
 		t.Fatalf("unexpected Content-Type %q. Expecting %q", h1.contentType, "")
 	}
 }
@@ -1557,7 +1599,7 @@ func TestResponseDateNoDefaultNotEmpty(t *testing.T) {
 	headers := h.String()
 
 	if strings.Contains(headers, "\r\nDate: ") {
-		t.Fatalf("ResponseDateNoDefaultNotEmpty fail, response: \n%+v\noutcome: \n%q\n", h, headers) //nolint:govet
+		t.Fatalf("ResponseDateNoDefaultNotEmpty fail, response: \n%+v\noutcome: \n%q\n", &h, headers)
 	}
 }
 
@@ -2144,7 +2186,7 @@ func testRequestHeaderMethod(t *testing.T, expectedMethod string) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	m1 := h1.Method()
-	if string(m) != string(m1) {
+	if !bytes.Equal(m, m1) {
 		t.Fatalf("unexpected method: %q. Expecting %q", m, m1)
 	}
 }
@@ -2448,10 +2490,6 @@ func TestResponseHeaderReadSuccess(t *testing.T) {
 	testResponseHeaderReadSuccess(t, h, "HTTP/1.1 200 OK\nContent-Length: 123\nContent-Type: text/html\n\n",
 		200, 123, "text/html")
 
-	// Zero-length headers with mixed crlf and lf
-	testResponseHeaderReadSuccess(t, h, "HTTP/1.1 400 OK\nContent-Length: 345\nZero-Value: \r\nContent-Type: aaa\n: zero-key\r\n\r\nooa",
-		400, 345, "aaa")
-
 	// No space after colon
 	testResponseHeaderReadSuccess(t, h, "HTTP/1.1 200 OK\nContent-Length:34\nContent-Type: sss\n\naaaa",
 		200, 34, "sss")
@@ -2513,6 +2551,10 @@ func TestResponseHeaderReadSuccess(t *testing.T) {
 	if !h.ConnectionClose() {
 		t.Fatalf("expecting connection: close for identity response")
 	}
+	// See https://github.com/valyala/fasthttp/issues/1909
+	if hasArg(h.h, HeaderTransferEncoding) {
+		t.Fatalf("unexpected header: 'Transfer-Encoding' should not be present in parsed headers")
+	}
 
 	// no content-type
 	testResponseHeaderReadSuccess(t, h, "HTTP/1.1 400 OK\r\nContent-Length: 123\r\n\r\nfoiaaa",
@@ -2559,21 +2601,21 @@ func TestRequestHeaderReadSuccess(t *testing.T) {
 
 	// simple headers
 	testRequestHeaderReadSuccess(t, h, "GET /foo/bar HTTP/1.1\r\nHost: google.com\r\n\r\n",
-		-2, "/foo/bar", "google.com", "", "", nil)
+		-2, "/foo/bar", "google.com", "", "")
 	if h.ConnectionClose() {
 		t.Fatalf("unexpected connection: close header")
 	}
 
 	// simple headers with body
 	testRequestHeaderReadSuccess(t, h, "GET /a/bar HTTP/1.1\r\nHost: gole.com\r\nconneCTION: close\r\n\r\nfoobar",
-		-2, "/a/bar", "gole.com", "", "", nil)
+		-2, "/a/bar", "gole.com", "", "")
 	if !h.ConnectionClose() {
 		t.Fatalf("connection: close unset")
 	}
 
 	// ancient http protocol
 	testRequestHeaderReadSuccess(t, h, "GET /bar HTTP/1.0\r\nHost: gole\r\n\r\npppp",
-		-2, "/bar", "gole", "", "", nil)
+		-2, "/bar", "gole", "", "")
 	if h.IsHTTP11() {
 		t.Fatalf("ancient http protocol cannot be http/1.1")
 	}
@@ -2583,7 +2625,7 @@ func TestRequestHeaderReadSuccess(t *testing.T) {
 
 	// ancient http protocol with 'Connection: keep-alive' header
 	testRequestHeaderReadSuccess(t, h, "GET /aa HTTP/1.0\r\nHost: bb\r\nConnection: keep-alive\r\n\r\nxxx",
-		-2, "/aa", "bb", "", "", nil)
+		-2, "/aa", "bb", "", "")
 	if h.IsHTTP11() {
 		t.Fatalf("ancient http protocol cannot be http/1.1")
 	}
@@ -2593,7 +2635,7 @@ func TestRequestHeaderReadSuccess(t *testing.T) {
 
 	// complex headers with body
 	testRequestHeaderReadSuccess(t, h, "GET /aabar HTTP/1.1\r\nAAA: bbb\r\nHost: ole.com\r\nAA: bb\r\n\r\nzzz",
-		-2, "/aabar", "ole.com", "", "", nil)
+		-2, "/aabar", "ole.com", "", "")
 	if !h.IsHTTP11() {
 		t.Fatalf("expecting http/1.1 protocol")
 	}
@@ -2603,103 +2645,87 @@ func TestRequestHeaderReadSuccess(t *testing.T) {
 
 	// lf instead of crlf
 	testRequestHeaderReadSuccess(t, h, "GET /foo/bar HTTP/1.1\nHost: google.com\n\n",
-		-2, "/foo/bar", "google.com", "", "", nil)
+		-2, "/foo/bar", "google.com", "", "")
 
 	// post method
 	testRequestHeaderReadSuccess(t, h, "POST /aaa?bbb HTTP/1.1\r\nHost: foobar.com\r\nContent-Length: 1235\r\nContent-Type: aaa\r\n\r\nabcdef",
-		1235, "/aaa?bbb", "foobar.com", "", "aaa", nil)
-
-	// zero-length headers with mixed crlf and lf
-	testRequestHeaderReadSuccess(t, h, "GET /a HTTP/1.1\nHost: aaa\r\nZero: \n: Zero-Value\n\r\nxccv",
-		-2, "/a", "aaa", "", "", nil)
+		1235, "/aaa?bbb", "foobar.com", "", "aaa")
 
 	// no space after colon
 	testRequestHeaderReadSuccess(t, h, "GET /a HTTP/1.1\nHost:aaaxd\n\nsdfds",
-		-2, "/a", "aaaxd", "", "", nil)
+		-2, "/a", "aaaxd", "", "")
 
 	// get with zero content-length
 	testRequestHeaderReadSuccess(t, h, "GET /xxx HTTP/1.1\nHost: aaa.com\nContent-Length: 0\n\n",
-		0, "/xxx", "aaa.com", "", "", nil)
+		0, "/xxx", "aaa.com", "", "")
 
 	// get with non-zero content-length
 	testRequestHeaderReadSuccess(t, h, "GET /xxx HTTP/1.1\nHost: aaa.com\nContent-Length: 123\n\n",
-		123, "/xxx", "aaa.com", "", "", nil)
+		123, "/xxx", "aaa.com", "", "")
 
 	// invalid case
 	testRequestHeaderReadSuccess(t, h, "GET /aaa HTTP/1.1\nhoST: bbb.com\n\naas",
-		-2, "/aaa", "bbb.com", "", "", nil)
+		-2, "/aaa", "bbb.com", "", "")
 
 	// referer
 	testRequestHeaderReadSuccess(t, h, "GET /asdf HTTP/1.1\nHost: aaa.com\nReferer: bb.com\n\naaa",
-		-2, "/asdf", "aaa.com", "bb.com", "", nil)
+		-2, "/asdf", "aaa.com", "bb.com", "")
 
 	// duplicate host
 	testRequestHeaderReadSuccess(t, h, "GET /aa HTTP/1.1\r\nHost: aaaaaa.com\r\nHost: bb.com\r\n\r\n",
-		-2, "/aa", "bb.com", "", "", nil)
+		-2, "/aa", "bb.com", "", "")
 
 	// post with duplicate content-type
 	testRequestHeaderReadSuccess(t, h, "POST /a HTTP/1.1\r\nHost: aa\r\nContent-Type: ab\r\nContent-Length: 123\r\nContent-Type: xx\r\n\r\n",
-		123, "/a", "aa", "", "xx", nil)
-
-	// post with duplicate content-length
-	testRequestHeaderReadSuccess(t, h, "POST /xx HTTP/1.1\r\nHost: aa\r\nContent-Type: s\r\nContent-Length: 13\r\nContent-Length: 1\r\n\r\n",
-		1, "/xx", "aa", "", "s", nil)
+		123, "/a", "aa", "", "xx")
 
 	// non-post with content-type
 	testRequestHeaderReadSuccess(t, h, "GET /aaa HTTP/1.1\r\nHost: bbb.com\r\nContent-Type: aaab\r\n\r\n",
-		-2, "/aaa", "bbb.com", "", "aaab", nil)
+		-2, "/aaa", "bbb.com", "", "aaab")
 
 	// non-post with content-length
 	testRequestHeaderReadSuccess(t, h, "HEAD / HTTP/1.1\r\nHost: aaa.com\r\nContent-Length: 123\r\n\r\n",
-		123, "/", "aaa.com", "", "", nil)
+		123, "/", "aaa.com", "", "")
 
 	// non-post with content-type and content-length
 	testRequestHeaderReadSuccess(t, h, "GET /aa HTTP/1.1\r\nHost: aa.com\r\nContent-Type: abd/test\r\nContent-Length: 123\r\n\r\n",
-		123, "/aa", "aa.com", "", "abd/test", nil)
+		123, "/aa", "aa.com", "", "abd/test")
 
 	// request uri with hostname
 	testRequestHeaderReadSuccess(t, h, "GET http://gooGle.com/foO/%20bar?xxx#aaa HTTP/1.1\r\nHost: aa.cOM\r\n\r\ntrail",
-		-2, "http://gooGle.com/foO/%20bar?xxx#aaa", "aa.cOM", "", "", nil)
-
-	// no protocol in the first line
-	testRequestHeaderReadSuccess(t, h, "GET /foo/bar\r\nHost: google.com\r\n\r\nisdD",
-		-2, "/foo/bar", "google.com", "", "", nil)
+		-2, "http://gooGle.com/foO/%20bar?xxx#aaa", "aa.cOM", "", "")
 
 	// blank lines before the first line
 	testRequestHeaderReadSuccess(t, h, "\r\n\n\r\nGET /aaa HTTP/1.1\r\nHost: aaa.com\r\n\r\nsss",
-		-2, "/aaa", "aaa.com", "", "", nil)
+		-2, "/aaa", "aaa.com", "", "")
 
 	// request uri with spaces
 	testRequestHeaderReadSuccess(t, h, "GET /foo/ bar baz HTTP/1.1\r\nHost: aa.com\r\n\r\nxxx",
-		-2, "/foo/ bar baz", "aa.com", "", "", nil)
+		-2, "/foo/ bar baz", "aa.com", "", "")
 
 	// no host
 	testRequestHeaderReadSuccess(t, h, "GET /foo/bar HTTP/1.1\r\nFOObar: assdfd\r\n\r\naaa",
-		-2, "/foo/bar", "", "", "", nil)
+		-2, "/foo/bar", "", "", "")
 
 	// no host, no headers
 	testRequestHeaderReadSuccess(t, h, "GET /foo/bar HTTP/1.1\r\n\r\nfoobar",
-		-2, "/foo/bar", "", "", "", nil)
+		-2, "/foo/bar", "", "", "")
 
 	// post without content-length and content-type
 	testRequestHeaderReadSuccess(t, h, "POST /aaa HTTP/1.1\r\nHost: aaa.com\r\n\r\nzxc",
-		-2, "/aaa", "aaa.com", "", "", nil)
+		-2, "/aaa", "aaa.com", "", "")
 
 	// post without content-type
 	testRequestHeaderReadSuccess(t, h, "POST /abc HTTP/1.1\r\nHost: aa.com\r\nContent-Length: 123\r\n\r\npoiuy",
-		123, "/abc", "aa.com", "", "", nil)
+		123, "/abc", "aa.com", "", "")
 
 	// post without content-length
 	testRequestHeaderReadSuccess(t, h, "POST /abc HTTP/1.1\r\nHost: aa.com\r\nContent-Type: adv\r\n\r\n123456",
-		-2, "/abc", "aa.com", "", "adv", nil)
-
-	// invalid method
-	testRequestHeaderReadSuccess(t, h, "POST /foo/bar HTTP/1.1\r\nHost: google.com\r\n\r\nmnbv",
-		-2, "/foo/bar", "google.com", "", "", nil)
+		-2, "/abc", "aa.com", "", "adv")
 
 	// put request
 	testRequestHeaderReadSuccess(t, h, "PUT /faa HTTP/1.1\r\nHost: aaa.com\r\nContent-Length: 123\r\nContent-Type: aaa\r\n\r\nxwwere",
-		123, "/faa", "aaa.com", "", "aaa", nil)
+		123, "/faa", "aaa.com", "", "aaa")
 }
 
 func TestResponseHeaderReadError(t *testing.T) {
@@ -2733,6 +2759,12 @@ func TestResponseHeaderReadError(t *testing.T) {
 
 	// forbidden trailer
 	testResponseHeaderReadError(t, h, "HTTP/1.1 200 OK\r\nContent-Length: -1\r\nTrailer: Foo, Content-Length\r\n\r\n")
+
+	// no protocol in the first line
+	testResponseHeaderReadError(t, h, "GET /foo/bar\r\nHost: google.com\r\n\r\nisdD")
+
+	// zero-length headers
+	testResponseHeaderReadError(t, h, "HTTP/1.1 200 OK\r\n: zero-key\r\n\r\n")
 }
 
 func TestResponseHeaderReadErrorSecureLog(t *testing.T) {
@@ -2780,6 +2812,15 @@ func TestRequestHeaderReadError(t *testing.T) {
 
 	// forbidden trailer
 	testRequestHeaderReadError(t, h, "POST /a HTTP/1.1\r\nContent-Length: -1\r\nTrailer: Foo, Content-Length\r\n\r\n")
+
+	// post with duplicate content-length
+	testRequestHeaderReadError(t, h, "POST /xx HTTP/1.1\r\nHost: aa\r\nContent-Type: s\r\nContent-Length: 13\r\nContent-Length: 1\r\n\r\n")
+
+	// Zero-length header
+	testRequestHeaderReadError(t, h, "GET /foo/bar HTTP/1.1\r\n: zero-key\r\n\r\n")
+
+	// Invalid method
+	testRequestHeaderReadError(t, h, "G(ET /foo/bar HTTP/1.1\r\n: zero-key\r\n\r\n")
 }
 
 func TestRequestHeaderReadSecuredError(t *testing.T) {
@@ -2829,6 +2870,8 @@ func testResponseHeaderReadSecuredError(t *testing.T, h *ResponseHeader, headers
 }
 
 func testRequestHeaderReadError(t *testing.T, h *RequestHeader, headers string) {
+	t.Helper()
+
 	r := bytes.NewBufferString(headers)
 	br := bufio.NewReader(r)
 	err := h.Read(br)
@@ -2838,7 +2881,7 @@ func testRequestHeaderReadError(t *testing.T, h *RequestHeader, headers string) 
 
 	// make sure request header works after error
 	testRequestHeaderReadSuccess(t, h, "GET /foo/bar HTTP/1.1\r\nHost: aaaa\r\n\r\nxxx",
-		-2, "/foo/bar", "aaaa", "", "", nil)
+		-2, "/foo/bar", "aaaa", "", "")
 }
 
 func testRequestHeaderReadSecuredError(t *testing.T, h *RequestHeader, headers string) {
@@ -2853,12 +2896,14 @@ func testRequestHeaderReadSecuredError(t *testing.T, h *RequestHeader, headers s
 	}
 	// make sure request header works after error
 	testRequestHeaderReadSuccess(t, h, "GET /foo/bar HTTP/1.1\r\nHost: aaaa\r\n\r\nxxx",
-		-2, "/foo/bar", "aaaa", "", "", nil)
+		-2, "/foo/bar", "aaaa", "", "")
 }
 
 func testResponseHeaderReadSuccess(t *testing.T, h *ResponseHeader, headers string, expectedStatusCode, expectedContentLength int,
 	expectedContentType string,
 ) {
+	t.Helper()
+
 	r := bytes.NewBufferString(headers)
 	br := bufio.NewReader(r)
 	err := h.Read(br)
@@ -2869,8 +2914,10 @@ func testResponseHeaderReadSuccess(t *testing.T, h *ResponseHeader, headers stri
 }
 
 func testRequestHeaderReadSuccess(t *testing.T, h *RequestHeader, headers string, expectedContentLength int,
-	expectedRequestURI, expectedHost, expectedReferer, expectedContentType string, expectedTrailer map[string]string,
+	expectedRequestURI, expectedHost, expectedReferer, expectedContentType string,
 ) {
+	t.Helper()
+
 	r := bytes.NewBufferString(headers)
 	br := bufio.NewReader(r)
 	err := h.Read(br)
@@ -2922,6 +2969,8 @@ func verifyRequestHeader(t *testing.T, h *RequestHeader, expectedContentLength i
 }
 
 func verifyResponseTrailer(t *testing.T, h *ResponseHeader, expectedTrailers map[string]string) {
+	t.Helper()
+
 	for k, v := range expectedTrailers {
 		got := h.Peek(k)
 		if !bytes.Equal(got, []byte(v)) {

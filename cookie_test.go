@@ -1,7 +1,6 @@
 package fasthttp
 
 import (
-	"bytes"
 	"strings"
 	"testing"
 	"time"
@@ -14,27 +13,6 @@ func TestCookiePanic(t *testing.T) {
 	if err := c.Parse(";SAMeSITe="); err != nil {
 		t.Error(err)
 	}
-}
-
-func FuzzCookieParse(f *testing.F) {
-	inputs := []string{
-		`xxx=yyy`,
-		`xxx=yyy; expires=Tue, 10 Nov 2009 23:00:00 GMT; domain=foobar.com; path=/a/b`,
-		" \n\t\"",
-	}
-	for _, input := range inputs {
-		f.Add([]byte(input))
-	}
-	c := AcquireCookie()
-	defer ReleaseCookie(c)
-	f.Fuzz(func(t *testing.T, cookie []byte) {
-		_ = c.ParseBytes(cookie)
-
-		w := bytes.Buffer{}
-		if _, err := c.WriteTo(&w); err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-	})
 }
 
 func TestCookieValueWithEqualAndSpaceChars(t *testing.T) {
@@ -235,6 +213,13 @@ func TestCookieMaxAge(t *testing.T) {
 	if s != "foo=bar; expires=Thu, 01 Jan 1970 00:01:40 GMT" {
 		t.Fatalf("missing expires %q", s)
 	}
+
+	c.SetMaxAge(-100)
+	result := strings.ToLower(c.String())
+	const expectedMaxAge0 = "max-age=0"
+	if !strings.Contains(result, expectedMaxAge0) {
+		t.Fatalf("Unexpected cookie %q. Should contain %q", result, expectedMaxAge0)
+	}
 }
 
 func TestCookieHttpOnly(t *testing.T) {
@@ -262,6 +247,35 @@ func TestCookieHttpOnly(t *testing.T) {
 	s = c.String()
 	if strings.Contains(s, "HttpOnly") {
 		t.Fatalf("unexpected HttpOnly flag in cookie %q", s)
+	}
+}
+
+func TestCookiePartitioned(t *testing.T) {
+	t.Parallel()
+
+	var c Cookie
+
+	if err := c.Parse("foo=bar; PATH=/; secure; Partitioned"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !c.Partitioned() {
+		t.Fatalf("Partitioned must be set")
+	}
+	s := c.String()
+	if !strings.Contains(s, "; Partitioned") {
+		t.Fatalf("missing Partitioned flag in cookie %q", s)
+	}
+
+	if !c.Secure() {
+		t.Fatalf("secure must be set")
+	}
+	s = c.String()
+	if !strings.Contains(s, "; secure") {
+		t.Fatalf("missing secure flag in cookie %q", s)
+	}
+
+	if string(c.Path()) != "/" {
+		t.Fatalf("path must be set /")
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 )
@@ -71,7 +72,7 @@ func testPathNotFound(t *testing.T, pathNotFoundFunc RequestHandler) {
 	var ctx RequestCtx
 	var req Request
 	req.SetRequestURI("http//some.url/file")
-	ctx.Init(&req, nil, TestLogger{t})
+	ctx.Init(&req, nil, TestLogger{t: t})
 
 	stop := make(chan struct{})
 	defer close(stop)
@@ -176,7 +177,7 @@ func TestServeFileSmallNoReadFrom(t *testing.T) {
 
 	buf := bytes.NewBuffer(nil)
 
-	n, err := reader.WriteTo(pureWriter{buf})
+	n, err := reader.WriteTo(pureWriter{w: buf})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -569,7 +570,7 @@ func runFSCompressConcurrent(t *testing.T, fs *FS) {
 		go func() {
 			for j := 0; j < 5; j++ {
 				testFSCompress(t, h, "/fs.go")
-				testFSCompress(t, h, "/")
+				testFSCompress(t, h, "/examples/")
 				testFSCompress(t, h, "/README.md")
 			}
 			ch <- struct{}{}
@@ -652,7 +653,7 @@ func testFSCompress(t *testing.T, h RequestHandler, filePath string) {
 		t.Errorf("unexpected status code: %d. Expecting %d. filePath=%q", resp.StatusCode(), StatusOK, filePath)
 	}
 	ce := resp.Header.ContentEncoding()
-	if string(ce) != "" {
+	if len(ce) != 0 {
 		t.Errorf("unexpected content-encoding %q. Expecting empty string. filePath=%q", ce, filePath)
 	}
 	body := string(resp.Body())
@@ -937,5 +938,68 @@ func TestServeFileDirectoryRedirect(t *testing.T) {
 	ServeFile(&ctx, "fs.go")
 	if ctx.Response.StatusCode() != StatusOK {
 		t.Fatalf("Unexpected status code %d for file '/fs.go'. Expecting %d.", ctx.Response.StatusCode(), StatusOK)
+	}
+}
+
+func TestFileCacheForZstd(t *testing.T) {
+	f, err := os.CreateTemp(os.TempDir(), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := bytes.Repeat([]byte("1"), 1000)
+	changedData := bytes.Repeat([]byte("2"), 1000)
+	_, err = f.Write(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = f.Sync()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs := FS{Root: os.TempDir(), Compress: true, CacheDuration: time.Second * 60}
+	h := fs.NewRequestHandler()
+	var ctx RequestCtx
+	var req Request
+	req.Header.Set("Accept-Encoding", "zstd")
+	req.SetRequestURI("http://foobar.com/" + strings.TrimPrefix(f.Name(), os.TempDir()))
+	ctx.Init(&req, nil, nil)
+	h(&ctx)
+	if !bytes.Equal(ctx.Response.Header.ContentEncoding(), []byte("zstd")) {
+		t.Fatalf("Unexpected 'Content-Encoding' %q. Expecting %q", ctx.Response.Header.ContentEncoding(), "zstd")
+	}
+	ctx.Response.Reset()
+	_, err = f.Seek(0, io.SeekStart)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.Write(changedData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	h(&ctx)
+	if !bytes.Equal(ctx.Response.Header.ContentEncoding(), []byte("zstd")) {
+		t.Fatalf("Unexpected 'Content-Encoding' %q. Expecting %q", ctx.Response.Header.ContentEncoding(), "zstd")
+	}
+	d, err := acquireZstdReader(strings.NewReader(string(ctx.Response.Body())))
+	if err != nil {
+		t.Fatalf("invalid zstd reader")
+	}
+	plainText, err := io.ReadAll(d)
+	d.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(plainText, data) {
+		t.Fatalf("Unexpected response body %q. Expecting %q . Zstd cache doesn't work", plainText, data)
+	}
+	ctx.Request.Header.Del("Accept-Encoding")
+	ctx.Response.Reset()
+	h(&ctx)
+	if !bytes.Equal(ctx.Response.Header.ContentEncoding(), []byte("")) {
+		t.Fatalf("Unexpected 'Content-Encoding' %q. Expecting %q", ctx.Response.Header.ContentEncoding(), "")
+	}
+	if !bytes.Equal(ctx.Response.Body(), changedData) {
+		t.Fatalf("Unexpected response body %q. Expecting %q", ctx.Response.Body(), data)
 	}
 }
